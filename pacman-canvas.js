@@ -29,63 +29,83 @@ function geronimo() {
 	var inky, blinky, clyde, pinky;
 
 	var mapConfig = "data/map.json";
+	var mapCache = null;			// map.json is loaded once and cloned for every level
 
+	// logical game size (all game logic works in these units)
+	var GAME_W = 540, GAME_H = 390;
+	var DPR = Math.min(window.devicePixelRatio || 1, 3);
 
-	/* AJAX stuff */
-	var getHighscore = () => {
-		setTimeout(ajax_get, 30);
-	}
-	var ajax_get = () => {
-		var date = new Date().getTime();
-		$.ajax({
-			datatype: "json",
-			type: "GET",
-			url: "data/db-handler.php",
-			data: {
-				timestamp: date,
-				action: "get"
-			},
-			success: function (msg) {
-				$("#highscore-list").text("");
-				for (var i = 0; i < msg.length; i++) {
-					$("#highscore-list").append("<li>" + msg[i]['name'] + "<span id='score'>" + msg[i]['score'] + "</span></li>");
-				}
-			}
+	// small localStorage helpers (never throw)
+	var store = {
+		get: function (k, def) {
+			try { var v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch (e) { return def; }
+		},
+		set: function (k, v) {
+			try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { }
+		}
+	};
+
+	/* Highscore (stored in this browser) */
+	var HS_KEY = "pacman_highscores_v1";
+	var Highscore = {
+		list: function () {
+			var l = store.get(HS_KEY, []);
+			return Array.isArray(l) ? l : [];
+		},
+		best: function () {
+			var l = this.list();
+			return l.length ? l[0].score : 0;
+		},
+		qualifies: function (score) {
+			if (score <= 0) return false;
+			var l = this.list();
+			return l.length < 10 || score > l[l.length - 1].score;
+		},
+		add: function (name, score, level) {
+			var l = this.list();
+			var entry = { name: name, score: score, level: level, date: new Date().toISOString().slice(0, 10) };
+			l.push(entry);
+			l.sort(function (a, b) { return b.score - a.score; });
+			l = l.slice(0, 10);
+			store.set(HS_KEY, l);
+			return l.indexOf(entry);
+		},
+		clear: function () { store.set(HS_KEY, []); }
+	};
+
+	function escapeHtml(s) {
+		return String(s).replace(/[&<>"']/g, function (c) {
+			return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
 		});
 	}
-	var ajax_add = (n, s, l) => {
 
-		$.ajax({
-			type: 'POST',
-			url: 'data/db-handler.php',
-			data: {
-				action: 'add',
-				name: n,
-				score: s,
-				level: l
-			},
-			dataType: 'json',
-			success: function (data) {
-				console.log('Highscore added: ' + data);
-				$('#highscore-form').html('<span class="button" id="show-highscore">View Highscore List</span>');
-			},
-			error: function (errorThrown) {
-				console.log(errorThrown);
-			}
-		});
-	}
+	var getHighscore = function (highlight) {
+		var l = Highscore.list();
+		var $list = $("#highscore-list").empty();
+		if (!l.length) {
+			$list.append("<li class='empty'>まだ記録がありません</li>");
+			return;
+		}
+		for (var i = 0; i < l.length; i++) {
+			var cls = (i === highlight) ? " class='new'" : "";
+			$list.append("<li" + cls + "><span class='rank'>" + (i + 1) + "</span><span class='hs-name'>" + escapeHtml(l[i].name)
+				+ "</span><span class='hs-level'>Lv" + (l[i].level || 1) + "</span><span class='hs-score'>" + l[i].score + "</span></li>");
+		}
+	};
 
 	function addHighscore() {
-		var name = $("input[type=text]").val();
-		$("#highscore-form").html("Saving highscore...");
-		ajax_add(name, game.score.score, game.level);
+		var name = $.trim($("#playerName").val()).slice(0, 10);
+		store.set("pacman_last_name", name);
+		var rank = Highscore.add(name, game.score.score, game.level);
+		game.refreshHiScore();
+		$("#highscore-form").html("<p class='saved'>" + (rank + 1) + "位に登録しました！</p><span class='button' id='show-highscore'>ランキングを見る</span>");
 	}
 
-	function buildWall(context, gridX, gridY, width, height) {
-		console.log("BuildWall");
+	function buildWall(context, gridX, gridY, width, height, inset) {
+		inset = inset || 0;
 		width = width * 2 - 1;
 		height = height * 2 - 1;
-		context.fillRect(pacman.radius / 2 + gridX * 2 * pacman.radius, pacman.radius / 2 + gridY * 2 * pacman.radius, width * pacman.radius, height * pacman.radius);
+		context.fillRect(pacman.radius / 2 + gridX * 2 * pacman.radius + inset, pacman.radius / 2 + gridY * 2 * pacman.radius + inset, width * pacman.radius - 2 * inset, height * pacman.radius - 2 * inset);
 	}
 
 	function between(x, min, max) {
@@ -150,13 +170,22 @@ function geronimo() {
 		this.monsters;
 		this.level = 1;
 		this.refreshLevel = function (h) {
-			$(h).html("Lvl: " + this.level);
+			$(h).html("<span class='label'>LEVEL</span><span class='val'>" + this.level + "</span>");
+		};
+		this.refreshHiScore = function () {
+			var hi = Math.max(Highscore.best(), this.score.score);
+			$(".hiscore").html("<span class='label'>HI-SCORE</span><span class='val'>" + hi + "</span>");
 		};
 		this.gameOver = false;
 		this.canvas = $("#myCanvas").get(0);
 		this.wallColor = "Blue";
-		this.width = this.canvas.width;
-		this.height = this.canvas.height;
+		this.width = GAME_W;
+		this.height = GAME_H;
+		this.readyTimer = 0;		// short "READY!" pause before play starts
+		this.ghostCombo = 0;		// ghosts eaten during one power pill
+		this.popups = [];			// floating score texts
+		this.extraLifeGiven = false;
+		this.frame = 0;
 
 		this.pillSize = 3;
 		this.powerpillSizeMin = 2;
@@ -164,12 +193,9 @@ function geronimo() {
 		this.powerpillSizeCurrent = this.powerpillSizeMax;
 		this.powerPillAnimationCounter = 0;
 		this.nextPowerPillSize = function () {
-			/*if (this.powerPillAnimationCounter === 3) {
-				this.powerPillAnimationCounter = 0;
-				this.powerpillSizeCurrent = this.powerpillSizeMin + this.powerpillSizeCurrent % (this.powerpillSizeMax-this.powerpillSizeMin);
-			} else {
-				this.powerPillAnimationCounter++;
-			}*/
+			// gentle pulsing animation
+			var t = (Math.sin(this.frame / 4) + 1) / 2;
+			this.powerpillSizeCurrent = this.powerpillSizeMin + 2 + t * (this.powerpillSizeMax + 1 - this.powerpillSizeMin - 2);
 			return this.powerpillSizeCurrent;
 		};
 
@@ -185,6 +211,7 @@ function geronimo() {
 			console.log("ghost frigthened");
 			this.ghostFrightened = true;
 			this.ghostFrightenedTimer = 240;
+			this.ghostCombo = 0;
 			inky.dazzle();
 			pinky.dazzle();
 			blinky.dazzle();
@@ -231,12 +258,11 @@ function geronimo() {
 		};
 
 		this.getMapContent = function (x, y) {
-			var maxX = game.width / 30 - 1;
-			var maxY = game.height / 30 - 1;
-			if (x < 0) x = maxX + x;
-			if (x > maxX) x = x - maxX;
-			if (y < 0) y = maxY + y;
-			if (y > maxY) y = y - maxY;
+			// wrap around the tunnel edges
+			var cols = game.width / 30;
+			var rows = game.height / 30;
+			x = ((x % cols) + cols) % cols;
+			y = ((y % rows) + rows) % rows;
 			return this.map.posY[y].posX[x].type;
 		};
 
@@ -245,26 +271,47 @@ function geronimo() {
 		};
 
 		this.toggleSound = function () {
-			this.soundfx === 0 ? this.soundfx = 1 : this.soundfx = 0;
-			$('#mute').toggle();
+			this.soundfx = this.soundfx === 0 ? 1 : 0;
+			store.set("pacman_sound", this.soundfx);
+			this.refreshSoundButton();
+		};
+		this.refreshSoundButton = function () {
+			$('#sound-toggle')
+				.toggleClass('on', this.soundfx === 1)
+				.attr('aria-pressed', this.soundfx === 1)
+				.attr('title', this.soundfx === 1 ? '音を消す (M)' : '音を出す (M)')
+				.text(this.soundfx === 1 ? '🔊' : '🔇');
 		};
 
 		this.reset = function () {
 		};
 
 		this.newGame = function () {
-			var r = confirm("Are you sure you want to restart?");
-			if (r) {
-				console.log("new Game");
-				this.init(0);
+			// ask only if a game is in progress
+			if (this.running && !this.gameOver) {
+				if (!this.pause) this.showMessage("ポーズ", "クリック・タップで再開");
+				$('#confirm-modal').fadeIn(150);
+			} else {
+				this.startNewGame();
+			}
+		};
+
+		this.startNewGame = async function () {
+			$('#confirm-modal').hide();
+			await this.init(0);
+			game.gameOver = false;
+			if (!this.running) {
+				this.pauseResume();
+			} else {
+				this.pause = true;
 				this.pauseResume();
 			}
 		};
 
 		this.nextLevel = function () {
 			this.level++;
-			console.log("Level " + game.level);
-			game.showMessage("Level " + game.level, this.getLevelTitle() + "<br/>(Click to continue!)");
+			Sound.play("levelup");
+			game.showMessage("LEVEL " + game.level, this.getLevelTitle() + "<br/><small>クリック・タップで次へ</small>");
 			game.refreshLevel(".level");
 			this.init(1);
 		};
@@ -272,60 +319,65 @@ function geronimo() {
 		this.drawHearts = function (count) {
 			var html = "";
 			for (var i = 0; i < count; i++) {
-				html += " <img src='img/heart.png'>";
+				html += "<span class='life'></span>";
 			}
-			$(".lives").html("Lives: " + html);
+			$(".lives").html(html);
 
 		};
 
 		this.showContent = function (id) {
+			if (id !== 'game-content' && this.running && !this.pause && !this.gameOver) {
+				this.showMessage("ポーズ", "クリック・タップで再開");
+			}
 			$('.content').hide();
 			$('#' + id).show();
+			window.scrollTo(0, 0);
 		};
 
 		this.getLevelTitle = function () {
 			switch (this.level) {
 				case 2:
-					return '"The chase begins"';
-				// activate chase / scatter switching
+					return '「追跡開始」<br/>おばけが追いかけてくるように';
 				case 3:
-					return '"Inky\s awakening"';
-				// Inky starts leaving the ghost house
+					return '「インキー目覚める」<br/>水色のおばけも出てくるぞ';
 				case 4:
-					return '"Clyde\s awakening"';
-				// Clyde starts leaving the ghost house
+					return '「クライド目覚める」<br/>オレンジのおばけも参戦';
 				case 5:
-					return '"need for speed"';
-				// All the ghosts get faster from now on
-				case 6:
-					return '"hunting season 1"';
-				// TODO: No scatter mood this time
-				case 7:
-					return '"the big calm"';
-				// TODO: Only scatter mood this time
-				case 8:
-					return '"hunting season 2"';
-				// TODO: No scatter mood and all ghosts leave instantly
-				case 9:
-					return '"ghosts on speed"';
-				// TODO: Ghosts get even faster for this level
+					return '「スピードアップ」<br/>おばけが速くなった！';
 				default:
-					return '"nothing new"';
+					return '「まだまだ続く」<br/>どこまで行けるかな？';
 			}
 		}
 
 		this.showMessage = function (title, text) {
 			this.timer.stop();
 			this.pause = true;
-			$('#canvas-overlay-container').fadeIn(200);
-			if ($('.controls').css('display') != "none") $('.controls').slideToggle(200);
+			$('body').removeClass('playing');
+			$('#canvas-overlay-container').stop(true, true).fadeIn(200);
 			$('#canvas-overlay-content #title').text(title);
 			$('#canvas-overlay-content #text').html(text);
 		};
 
 		this.closeMessage = function () {
-			$('#canvas-overlay-container').fadeOut(200);
-			$('.controls').slideToggle(200);
+			$('#canvas-overlay-container').stop(true, true).fadeOut(200);
+			$('body').addClass('playing');
+		};
+
+		this.addPopup = function (x, y, text, color) {
+			this.popups.push({ x: x, y: y, text: text, color: color || "#5ef2ff", ttl: 40 });
+		};
+
+		this.addScore = function (points) {
+			var before = this.score.score;
+			this.score.add(points);
+			// one extra life at 10,000 points
+			if (!this.extraLifeGiven && before < 10000 && this.score.score >= 10000) {
+				this.extraLifeGiven = true;
+				pacman.lives++;
+				this.drawHearts(pacman.lives);
+				this.addPopup(GAME_W / 2, GAME_H / 2, "1UP!", "#ffe14d");
+				Sound.play("levelup");
+			}
 		};
 
 		this.pauseResume = function () {
@@ -346,12 +398,15 @@ function geronimo() {
 				this.closeMessage();
 			}
 			else {
-				this.showMessage("Pause", "Click to Resume");
+				this.showMessage("ポーズ", "クリック・タップで再開");
 			}
 		};
 
 		this.loadMapConfig = async () => {
-			console.log('load map connfig');
+			if (mapCache) {
+				game.map = JSON.parse(JSON.stringify(mapCache));
+				return game.map;
+			}
 			return new Promise((resolve, reject) => {
 				$.ajax({
 					url: mapConfig,
@@ -360,7 +415,7 @@ function geronimo() {
 					},
 					dataType: "json",
 					success: (data) => {
-						console.log('map connfig loaded');
+						mapCache = JSON.parse(JSON.stringify(data));
 						game.map = data;
 						resolve(data);
 					},
@@ -408,10 +463,20 @@ function geronimo() {
 				game.level = 1;
 				this.refreshLevel(".level");
 				game.gameOver = false;
+				this.extraLifeGiven = false;
 			}
 			pacman.reset();
+			pacman.beastMode = false;
+			pacman.beastModeTimer = 0;
 
 			game.drawHearts(pacman.lives);
+			this.refreshHiScore();
+
+			// ghosts get faster from level 5 on (speed must divide 30)
+			this.ghostSpeedNormal = (this.level >= 5 ? 3 : 2);
+			this.readyTimer = 45;
+			this.popups = [];
+			this.ghostCombo = 0;
 
 			this.ghostFrightened = false;
 			this.ghostFrightenedTimer = 240;
@@ -456,76 +521,84 @@ function geronimo() {
 		};
 
 		/* ------------ Start Pre-Build Walls  ------------ */
+		var WALLS = [
+			[0, 0, 18, 1],
+			[0, 12, 18, 1],
+			[0, 0, 1, 6],
+			[0, 7, 1, 6],
+			[17, 0, 1, 6],
+			[17, 7, 1, 6],
+			[7, 4, 1, 1],
+			[6, 5, 1, 2],
+			[10, 4, 1, 1],
+			[11, 5, 1, 2],
+			[6, 6, 6, 1],
+			[4, 0, 1, 2],
+			[13, 0, 1, 2],
+			[2, 2, 1, 2],
+			[6, 2, 2, 1],
+			[15, 2, 1, 2],
+			[10, 2, 2, 1],
+			[2, 3, 2, 1],
+			[14, 3, 2, 1],
+			[5, 3, 1, 1],
+			[12, 3, 1, 1],
+			[3, 3, 1, 3],
+			[14, 3, 1, 3],
+			[3, 4, 1, 1],
+			[14, 4, 1, 1],
+			[0, 5, 2, 1],
+			[3, 5, 2, 1],
+			[16, 5, 2, 1],
+			[13, 5, 2, 1],
+			[0, 7, 2, 2],
+			[16, 7, 2, 2],
+			[3, 7, 2, 2],
+			[13, 7, 2, 2],
+			[4, 8, 2, 2],
+			[12, 8, 2, 2],
+			[5, 8, 3, 1],
+			[10, 8, 3, 1],
+			[2, 10, 1, 1],
+			[15, 10, 1, 1],
+			[7, 10, 4, 1],
+			[4, 11, 2, 2],
+			[12, 11, 2, 2],
+		];
 		this.buildWalls = function () {
-			if (this.ghostMode === 0) game.wallColor = "Blue";
-			else game.wallColor = "Red";
+			var chase = (this.ghostMode !== 0);
+			game.wallColor = chase ? "Red" : "Blue";
+			var edge = chase ? "#ff4d6d" : "#4d7cff";
+			var glow = chase ? "rgba(255,40,80,0.9)" : "rgba(60,110,255,0.9)";
+			var inner = chase ? "#2a0712" : "#070d33";
+
 			canvas_walls = document.createElement('canvas');
-			canvas_walls.width = game.canvas.width;
-			canvas_walls.height = game.canvas.height;
+			canvas_walls.width = GAME_W * DPR;
+			canvas_walls.height = GAME_H * DPR;
 			context_walls = canvas_walls.getContext("2d");
+			context_walls.scale(DPR, DPR);
 
-			context_walls.fillStyle = game.wallColor;
-			context_walls.strokeStyle = game.wallColor;
+			// pass 1: bright neon body with glow
+			context_walls.save();
+			context_walls.shadowColor = glow;
+			context_walls.shadowBlur = 10;
+			context_walls.fillStyle = edge;
+			for (var i = 0; i < WALLS.length; i++) {
+				var w = WALLS[i];
+				buildWall(context_walls, w[0], w[1], w[2], w[3]);
+			}
+			context_walls.restore();
 
-			//horizontal outer
-			buildWall(context_walls, 0, 0, 18, 1);
-			buildWall(context_walls, 0, 12, 18, 1);
-
-			// vertical outer
-			buildWall(context_walls, 0, 0, 1, 6);
-			buildWall(context_walls, 0, 7, 1, 6);
-			buildWall(context_walls, 17, 0, 1, 6);
-			buildWall(context_walls, 17, 7, 1, 6);
-
-			// ghost base
-			buildWall(context_walls, 7, 4, 1, 1);
-			buildWall(context_walls, 6, 5, 1, 2);
-			buildWall(context_walls, 10, 4, 1, 1);
-			buildWall(context_walls, 11, 5, 1, 2);
-			buildWall(context_walls, 6, 6, 6, 1);
+			// pass 2: dark inside -> leaves a glowing outline
+			context_walls.fillStyle = inner;
+			for (var j = 0; j < WALLS.length; j++) {
+				var v = WALLS[j];
+				buildWall(context_walls, v[0], v[1], v[2], v[3], 3);
+			}
 
 			// ghost base door
-			context_walls.fillRect(8 * 2 * pacman.radius, pacman.radius / 2 + 4 * 2 * pacman.radius + 5, 4 * pacman.radius, 1);
-
-			// single blocks
-			buildWall(context_walls, 4, 0, 1, 2);
-			buildWall(context_walls, 13, 0, 1, 2);
-
-			buildWall(context_walls, 2, 2, 1, 2);
-			buildWall(context_walls, 6, 2, 2, 1);
-			buildWall(context_walls, 15, 2, 1, 2);
-			buildWall(context_walls, 10, 2, 2, 1);
-
-			buildWall(context_walls, 2, 3, 2, 1);
-			buildWall(context_walls, 14, 3, 2, 1);
-			buildWall(context_walls, 5, 3, 1, 1);
-			buildWall(context_walls, 12, 3, 1, 1);
-			buildWall(context_walls, 3, 3, 1, 3);
-			buildWall(context_walls, 14, 3, 1, 3);
-
-			buildWall(context_walls, 3, 4, 1, 1);
-			buildWall(context_walls, 14, 4, 1, 1);
-
-			buildWall(context_walls, 0, 5, 2, 1);
-			buildWall(context_walls, 3, 5, 2, 1);
-			buildWall(context_walls, 16, 5, 2, 1);
-			buildWall(context_walls, 13, 5, 2, 1);
-
-			buildWall(context_walls, 0, 7, 2, 2);
-			buildWall(context_walls, 16, 7, 2, 2);
-			buildWall(context_walls, 3, 7, 2, 2);
-			buildWall(context_walls, 13, 7, 2, 2);
-
-			buildWall(context_walls, 4, 8, 2, 2);
-			buildWall(context_walls, 12, 8, 2, 2);
-			buildWall(context_walls, 5, 8, 3, 1);
-			buildWall(context_walls, 10, 8, 3, 1);
-
-			buildWall(context_walls, 2, 10, 1, 1);
-			buildWall(context_walls, 15, 10, 1, 1);
-			buildWall(context_walls, 7, 10, 4, 1);
-			buildWall(context_walls, 4, 11, 2, 2);
-			buildWall(context_walls, 12, 11, 2, 2);
+			context_walls.fillStyle = "#ff9ad5";
+			context_walls.fillRect(8 * 2 * pacman.radius, pacman.radius / 2 + 4 * 2 * pacman.radius + 4, 4 * pacman.radius, 3);
 			/* ------------ End Pre-Build Walls  ------------ */
 		};
 
@@ -544,7 +617,10 @@ function geronimo() {
 			this.score += i;
 		};
 		this.refresh = function (h) {
-			$(h).html("Score: " + this.score);
+			if (this._shown === this.score) return;
+			this._shown = this.score;
+			$(h).html("<span class='label'>SCORE</span><span class='val'>" + this.score + "</span>");
+			if (this.score > Highscore.best()) game.refreshHiScore();
 		};
 
 	}
@@ -553,11 +629,34 @@ function geronimo() {
 
 	// used to play sounds during the game
 	var Sound = {};
+	var audioCtx = null;
+	function beep(notes) {
+		try {
+			audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+			var t = audioCtx.currentTime;
+			notes.forEach(function (n, i) {
+				var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+				o.type = "square";
+				o.frequency.value = n;
+				g.gain.setValueAtTime(0.08, t + i * 0.09);
+				g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.09 + 0.12);
+				o.connect(g); g.connect(audioCtx.destination);
+				o.start(t + i * 0.09);
+				o.stop(t + i * 0.09 + 0.13);
+			});
+		} catch (e) { }
+	}
 	Sound.play = function (sound) {
-		if (game.soundfx == 1) {
-			var audio = document.getElementById(sound);
-			(audio !== null) ? audio.play() : console.log(sound + " not found");
-		}
+		if (game.soundfx != 1) return;
+		if (sound === "levelup") { beep([523, 659, 784, 1047]); return; }
+		var audio = document.getElementById(sound);
+		if (audio === null) return;
+		try {
+			if (sound === "waka" && !audio.paused) return;	// avoid stutter
+			audio.currentTime = 0;
+			var p = audio.play();
+			if (p && p.catch) p.catch(function () { });
+		} catch (e) { }
 	};
 
 
@@ -686,8 +785,12 @@ function geronimo() {
 
 		this.die = function () {
 			if (!this.dead) {
-				game.score.add(100);
-				//this.reset();
+				// 200 -> 400 -> 800 -> 1600 for each ghost eaten with one power pill
+				var pts = 200 * Math.pow(2, Math.min(game.ghostCombo, 3));
+				game.ghostCombo++;
+				game.addScore(pts);
+				game.addPopup(this.getCenterX(), this.getCenterY(), String(pts));
+				Sound.play("eatghost");
 				this.dead = true;
 				this.changeSpeed(game.ghostSpeedNormal);
 			}
@@ -1044,7 +1147,7 @@ function geronimo() {
 							game.pillCount--;
 						}
 						game.map.posY[gridY].posX[gridX].type = "null";
-						game.score.add(s);
+						game.addScore(s);
 					}
 				}
 
@@ -1078,21 +1181,11 @@ function geronimo() {
 						//console.log("changeDirection to "+directionWatcher.get().name);
 
 						// check if possible to change direction without getting stuck
-						console.log("x: " + this.getGridPosX() + " + " + this.directionWatcher.get().dirX);
-						console.log("y: " + this.getGridPosY() + " + " + this.directionWatcher.get().dirY);
 						var x = this.getGridPosX() + this.directionWatcher.get().dirX;
 						var y = this.getGridPosY() + this.directionWatcher.get().dirY;
-						if (x <= -1) x = game.width / (this.radius * 2) - 1;
-						if (x >= game.width / (this.radius * 2)) x = 0;
-						if (y <= -1) x = game.height / (this.radius * 2) - 1;
-						if (y >= game.heigth / (this.radius * 2)) y = 0;
+						var nextTile = game.getMapContent(x, y);
 
-						console.log("x: " + x);
-						console.log("y: " + y);
-						var nextTile = game.map.posY[y].posX[x].type;
-						console.log("checkNextTile: " + nextTile);
-
-						if (nextTile != "wall") {
+						if (nextTile != "wall" && nextTile != "door") {
 							this.setDirection(this.directionWatcher.get());
 							this.directionWatcher.set(null);
 						}
@@ -1191,23 +1284,36 @@ function geronimo() {
 			}
 		}
 		this.die = function () {
+			if (this.frozen) return;	// already dying
 			Sound.play("die");
 			this.freeze();
 			this.dieAnimation();
 		}
 		this.dieFinal = function () {
 			this.reset();
+			this.beastMode = false;
+			this.beastModeTimer = 0;
+			game.ghostFrightened = false;
 			pinky.reset();
 			inky.reset();
 			blinky.reset();
 			clyde.reset();
 			this.lives--;
-			console.log("pacman died, " + this.lives + " lives left");
 			if (this.lives <= 0) {
-				var input = "<div id='highscore-form'><span id='form-validater'></span><input type='text' id='playerName'/><span class='button' id='score-submit'>save</span></div>";
-				game.showMessage("Game over", "Total Score: " + game.score.score + input);
+				var score = game.score.score;
+				var html = "スコア: <b>" + score + "</b><br/>到達レベル: " + game.level;
+				if (Highscore.qualifies(score)) {
+					var last = escapeHtml(store.get("pacman_last_name", ""));
+					html += "<div id='highscore-form'><p class='newrecord'>ランキング入り！名前を入れてね</p><span id='form-validater'></span>"
+						+ "<input type='text' id='playerName' maxlength='10' placeholder='なまえ' value='" + last + "' autocomplete='off'/>"
+						+ "<span class='button' id='score-submit'>登録</span></div>";
+				}
+				html += "<div><span class='button' id='retry'>もう一度遊ぶ</span></div>";
+				game.showMessage("GAME OVER", html);
 				game.gameOver = true;
-				$('#playerName').focus();
+				setTimeout(function () { $('#playerName').focus(); }, 250);
+			} else {
+				game.readyTimer = 45;
 			}
 			game.drawHearts(this.lives);
 		}
@@ -1223,39 +1329,7 @@ function geronimo() {
 	game.buildWalls();
 
 
-	// Check if a new cache is available on page load.	 
-	function checkAppCache() {
-		console.log('check AppCache');
-		window.applicationCache.addEventListener('updateready', function (e) {
-			console.log("AppCache: updateready");
-			if (window.applicationCache.status == window.applicationCache.UPDATEREADY) {
-
-				// Browser downloaded a new app cache.
-				// Swap it in and reload the page to get the new hotness.
-				window.applicationCache.swapCache();
-				if (confirm('A new version of this site is available. Load it?')) {
-					window.location.reload();
-				}
-
-			} else {
-				// Manifest didn't change. Nothing new to server.
-			}
-		}, false);
-
-		window.applicationCache.addEventListener('cached', function (e) {
-			console.log("AppCache: cached");
-		}, false);
-
-	}
-
-
 	// Action starts here:
-
-	function hideAdressbar() {
-		console.log("hide adressbar");
-		$("html").scrollTop(1);
-		$("body").scrollTop(1);
-	}
 
 	$(document).ready(function () {
 
@@ -1269,180 +1343,160 @@ function geronimo() {
 			}
 		});
 
-		// Hide address bar
-		hideAdressbar();
-
-		if (window.applicationCache != null) checkAppCache();
-
 		/* -------------------- EVENT LISTENERS -------------------------- */
-
-		// Listen for resize changes
-		/*window.addEventListener("resize", function() {
-			// Get screen size (inner/outerWidth, inner/outerHeight)
-			// deactivated because of problems
-			if ((window.outerHeight < window.outerWidth) && (window.outerHeight < 720)) {
-			game.showMessage("Rotate Device","Your screen is too small to play in landscape view.");
-			console.log("rotate your device to portrait!");
-			}
-		}, false);*/
-
-
-		// --------------- Controls
-
 
 		// Keyboard
 		window.addEventListener('keydown', doKeyDown, true);
 
-		$('#canvas-container').click(function () {
+		$('#canvas-container').on('click', function (e) {
+			if ($(e.target).closest('#highscore-form, .button, input').length) return;
 			if (!(game.gameOver == true)) game.pauseResume();
 		});
 
+		// pause automatically when the tab / app goes to background
+		document.addEventListener('visibilitychange', function () {
+			if (document.hidden && game.running && !game.pause && !game.gameOver) {
+				game.showMessage("ポーズ", "クリック・タップで再開");
+			}
+		});
+
 		$('body').on('click', '#score-submit', function () {
-			console.log("submit highscore pressed");
-			if ($('#playerName').val() === "" || $('#playerName').val() === undefined) {
-				$('#form-validater').html("Please enter a name<br/>");
+			if ($.trim($('#playerName').val()) === "") {
+				$('#form-validater').html("名前を入れてください<br/>");
 			} else {
 				$('#form-validater').html("");
 				addHighscore();
 			}
 		});
+		$('body').on('keydown', '#playerName', function (e) {
+			if (e.key === 'Enter') { e.preventDefault(); $('#score-submit').click(); }
+		});
 
 		$('body').on('click', '#show-highscore', function () {
 			game.showContent('highscore-content');
-			getHighscore();
+			getHighscore(0);
+		});
+		$('body').on('click', '#retry', function () {
+			game.startNewGame();
 		});
 
-		// Hammerjs Touch Events
-		/*Hammer('#canvas-container').on("tap", function(event) {
-			if (!(game.gameOver == true))	game.pauseResume();
-		});*/
-		Hammer('.container').on("swiperight", function (event) {
-			if ($('#game-content').is(":visible")) {
-				event.gesture.preventDefault();
-				pacman.directionWatcher.set(right);
-			}
-		});
-		Hammer('.container').on("swipeleft", function (event) {
-			if ($('#game-content').is(":visible")) {
-				event.gesture.preventDefault();
-				pacman.directionWatcher.set(left);
-			}
-		});
-		Hammer('.container').on("swipeup", function (event) {
-			if ($('#game-content').is(":visible")) {
-				event.gesture.preventDefault();
-				pacman.directionWatcher.set(up);
-			}
-		});
-		Hammer('.container').on("swipedown", function (event) {
-			if ($('#game-content').is(":visible")) {
-				event.gesture.preventDefault();
-				pacman.directionWatcher.set(down);
-			}
+		// confirm dialog for "new game"
+		$('#confirm-yes').on('click', function () { game.startNewGame(); });
+		$('#confirm-no').on('click', function () { $('#confirm-modal').fadeOut(150); });
+
+		// Hammerjs touch swipe
+		["right", "left", "up", "down"].forEach(function (name) {
+			var dirs = { right: right, left: left, up: up, down: down };
+			Hammer('.container').on("swipe" + name, function (event) {
+				if ($('#game-content').is(":visible")) {
+					event.gesture.preventDefault();
+					pacman.directionWatcher.set(dirs[name]);
+				}
+			});
 		});
 
-		// Mobile Control Buttons
-		$(document).on('touchend mousedown', '#up', function (event) {
+		// On-screen D-pad
+		var padDirs = { up: up, down: down, left: left, right: right };
+		$(document).on('touchstart mousedown', '.controlButton', function (event) {
 			event.preventDefault();
-			pacman.directionWatcher.set(up);
+			var d = padDirs[this.id];
+			if (d) pacman.directionWatcher.set(d);
+			$(this).addClass('pressed');
 		});
-		$(document).on('touchend mousedown', '#down', function (event) {
-			event.preventDefault();
-			pacman.directionWatcher.set(down);
-		});
-		$(document).on('touchend mousedown', '#left', function (event) {
-			event.preventDefault();
-			pacman.directionWatcher.set(left);
-		});
-		$(document).on('touchend mousedown', '#right', function (event) {
-			event.preventDefault();
-			pacman.directionWatcher.set(right);
+		$(document).on('touchend touchcancel mouseup mouseleave', '.controlButton', function () {
+			$(this).removeClass('pressed');
 		});
 
 		// Menu
-		$(document).on('click', '.button#newGame', function (event) {
-			game.newGame();
-		});
-		$(document).on('click', '.button#highscore', function (event) {
+		$(document).on('click', '.button#newGame', function () { game.newGame(); });
+		$(document).on('click', '.button#highscore', function () {
 			game.showContent('highscore-content');
 			getHighscore();
 		});
-		$(document).on('click', '.button#instructions', function (event) {
-			game.showContent('instructions-content');
+		$(document).on('click', '.button#instructions', function () { game.showContent('instructions-content'); });
+		$(document).on('click', '.button#info', function () { game.showContent('info-content'); });
+		$(document).on('click', '.button.back', function () { game.showContent('game-content'); });
+		$(document).on('click', '#clear-highscore', function () {
+			if (confirm('ランキングの記録をすべて消しますか？')) {
+				Highscore.clear();
+				getHighscore();
+				game.refreshHiScore();
+			}
 		});
-		$(document).on('click', '.button#info', function (event) {
-			game.showContent('info-content');
-		});
-		// back button
-		$(document).on('click', '.button#back', function (event) {
-			game.showContent('game-content');
-		});
-		// toggleSound
-		$(document).on('click', '.controlSound', function (event) {
+		$(document).on('click', '#sound-toggle', function (e) {
+			e.stopPropagation();
 			game.toggleSound();
 		});
-		// get latest
-		$(document).on('click', '#updateCode', function (event) {
-			console.log('check for new version');
-			event.preventDefault();
-			window.applicationCache.update();
-		});
-
-		// checkAppCache();
 
 		canvas = $("#myCanvas").get(0);
+		canvas.width = GAME_W * DPR;
+		canvas.height = GAME_H * DPR;
 		context = canvas.getContext("2d");
 
+		game.soundfx = store.get("pacman_sound", 0) === 1 ? 1 : 0;
+		game.refreshSoundButton();
 
-
-		/* --------------- GAME INITIALISATION ------------------------------------
-		
-			TODO: put this into Game object and change code to accept different setups / levels
-		
-		-------------------------------------------------------------------------- */
-
-		game.init(0);
 		logger.disableLogger();
 
-		renderContent();
+		game.init(0).then(function () {
+			renderContent();
+		});
 	});
 
+	function clearCanvas() {
+		context.setTransform(DPR, 0, 0, DPR, 0, 0);
+		context.clearRect(0, 0, GAME_W, GAME_H);
+	}
+
 	function renderContent() {
-		//context.save()
+		clearCanvas();
+		game.frame++;
 
 		// Refresh Score
 		game.score.refresh(".score");
 
 		// Pills
 		context.beginPath();
-		context.fillStyle = "White";
-		context.strokeStyle = "White";
+		context.fillStyle = "#ffe0bd";
 
 		var dotPosY;
-		console.log('paint pills', game.map);
 		if (game.map && game.map.posY && game.map.posY.length > 0) {
 			$.each(game.map.posY, (i, row) => {
 				dotPosY = row.row;
 				$.each(row.posX, (j, column) => {
 					if (column.type == "pill") {
-						context.arc(game.toPixelPos(column.col - 1) + pacman.radius, game.toPixelPos(dotPosY - 1) + pacman.radius, game.pillSize, 0 * Math.PI, 2 * Math.PI);
-						context.moveTo(game.toPixelPos(column.col - 1), game.toPixelPos(dotPosY - 1));
-					}
-					else if (column.type == "powerpill") {
-						context.arc(game.toPixelPos(column.col - 1) + pacman.radius, game.toPixelPos(dotPosY - 1) + pacman.radius, game.powerpillSizeCurrent, 0 * Math.PI, 2 * Math.PI);
-						context.moveTo(game.toPixelPos(column.col - 1), game.toPixelPos(dotPosY - 1));
+						var px = game.toPixelPos(column.col - 1) + pacman.radius;
+						var py = game.toPixelPos(dotPosY - 1) + pacman.radius;
+						context.moveTo(px + game.pillSize, py);
+						context.arc(px, py, game.pillSize, 0, 2 * Math.PI);
 					}
 				});
 			});
-		} else {
-			console.warn('Map not loaded (yet).')
+			context.fill();
+
+			// power pills (pulsing + glow)
+			var pps = game.nextPowerPillSize();
+			context.save();
+			context.shadowColor = "rgba(255,230,190,0.9)";
+			context.shadowBlur = 12;
+			context.fillStyle = "#fff3e0";
+			$.each(game.map.posY, (i, row) => {
+				$.each(row.posX, (j, column) => {
+					if (column.type == "powerpill") {
+						context.beginPath();
+						context.arc(game.toPixelPos(column.col - 1) + pacman.radius, game.toPixelPos(row.row - 1) + pacman.radius, pps, 0, 2 * Math.PI);
+						context.fill();
+					}
+				});
+			});
+			context.restore();
 		}
 
-		console.log("pps: " + game.nextPowerPillSize());
-		context.fill();
-
-		// Walls
+		// Walls (pre-rendered at device resolution)
+		context.save();
+		context.setTransform(1, 0, 0, 1, 0, 0);
 		context.drawImage(canvas_walls, 0, 0);
+		context.restore();
 
 
 		if (game.running == true) {
@@ -1454,122 +1508,122 @@ function geronimo() {
 
 
 			// Pac Man
+			context.save();
 			context.beginPath();
-			context.fillStyle = "Yellow";
-			context.strokeStyle = "Yellow";
-			context.arc(pacman.posX + pacman.radius, pacman.posY + pacman.radius, pacman.radius, pacman.angle1 * Math.PI, pacman.angle2 * Math.PI);
+			context.shadowColor = "rgba(255,230,0,0.7)";
+			context.shadowBlur = pacman.beastMode ? 16 : 6;
+			context.fillStyle = "#ffe600";
+			context.arc(pacman.posX + pacman.radius, pacman.posY + pacman.radius, pacman.radius - 1, pacman.angle1 * Math.PI, pacman.angle2 * Math.PI);
 			context.lineTo(pacman.posX + pacman.radius, pacman.posY + pacman.radius);
-			context.stroke();
+			context.closePath();
 			context.fill();
+			context.restore();
+
+			// floating score popups
+			context.save();
+			context.textAlign = "center";
+			context.textBaseline = "middle";
+			context.font = "10px 'Press Start 2P', monospace";
+			game.popups = game.popups.filter(function (p) {
+				context.globalAlpha = Math.min(1, p.ttl / 15);
+				context.fillStyle = p.color;
+				context.fillText(p.text, p.x, p.y - (40 - p.ttl) * 0.5);
+				if (!game.pause) p.ttl--;
+				return p.ttl > 0;
+			});
+			context.restore();
+
+			// READY!
+			if (game.readyTimer > 0 && !game.gameOver) {
+				context.save();
+				context.textAlign = "center";
+				context.textBaseline = "middle";
+				context.font = "14px 'Press Start 2P', monospace";
+				context.fillStyle = "#ffe600";
+				context.shadowColor = "#000";
+				context.shadowBlur = 6;
+				context.fillText("READY!", GAME_W / 2, 3.5 * 30 + 15);
+				context.restore();
+			}
 		}
 
-	}
-
-	function renderGrid(gridPixelSize, color) {
-		context.save();
-		context.lineWidth = 0.5;
-		context.strokeStyle = color;
-
-		// horizontal grid lines
-		for (var i = 0; i <= canvas.height; i = i + gridPixelSize) {
-			context.beginPath();
-			context.moveTo(0, i);
-			context.lineTo(canvas.width, i);
-			context.closePath();
-			context.stroke();
-		}
-
-		// vertical grid lines
-		for (var i = 0; i <= canvas.width; i = i + gridPixelSize) {
-			context.beginPath();
-			context.moveTo(i, 0);
-			context.lineTo(i, canvas.height);
-			context.closePath();
-			context.stroke();
-		}
-
-		context.restore();
 	}
 
 	function animationLoop() {
-		canvas.width = canvas.width;
-		//renderGrid(pacman.radius, "red");
 		renderContent();
 
-		if (game.dieAnimation == 1) pacman.dieAnimation();
 		if (game.pause != true) {
-			// Make changes before next loop
-			pacman.move();
-			pacman.eat();
-			pacman.checkDirectionChange();
-			pacman.checkCollisions();		// has to be the LAST method called on pacman
+			if (game.readyTimer > 0) {
+				game.readyTimer--;
+			} else {
+				// Make changes before next loop
+				pacman.move();
+				pacman.eat();
+				pacman.checkDirectionChange();
+				pacman.checkCollisions();		// has to be the LAST method called on pacman
 
+				blinky.move();
+				inky.move();
+				pinky.move();
+				clyde.move();
 
-
-			blinky.move();
-			inky.move();
-			pinky.move();
-			clyde.move();
-
-			game.checkGhostMode();
+				game.checkGhostMode();
+			}
 		}
 
 		// All dots collected?
 		game.check();
 
-
-		//requestAnimationFrame(animationLoop);
 		setTimeout(animationLoop, game.refreshRate);
-
-
 	}
 
 
 
 	function doKeyDown(evt) {
+		// typing a name: don't steer pacman
+		if (evt.target && /^(INPUT|TEXTAREA)$/.test(evt.target.tagName)) return;
+		// confirm dialog open
+		if ($('#confirm-modal').is(':visible')) {
+			if (evt.keyCode === 27) $('#confirm-modal').fadeOut(150);
+			return;
+		}
+		var inGame = $('#game-content').is(':visible');
 
 		switch (evt.keyCode) {
 			case 38:	// UP Arrow Key pressed
-				evt.preventDefault();
 			case 87:	// W pressed
-				pacman.directionWatcher.set(up);
+				if (inGame) { evt.preventDefault(); pacman.directionWatcher.set(up); }
 				break;
 			case 40:	// DOWN Arrow Key pressed
-				evt.preventDefault();
-			case 83:	// S pressed 
-				pacman.directionWatcher.set(down);
+			case 83:	// S pressed
+				if (inGame) { evt.preventDefault(); pacman.directionWatcher.set(down); }
 				break;
 			case 37:	// LEFT Arrow Key pressed
-				evt.preventDefault();
 			case 65:	// A pressed
-				pacman.directionWatcher.set(left);
+				if (inGame) { evt.preventDefault(); pacman.directionWatcher.set(left); }
 				break;
 			case 39:	// RIGHT Arrow Key pressed
-				evt.preventDefault();
 			case 68:	// D pressed
-				pacman.directionWatcher.set(right);
+				if (inGame) { evt.preventDefault(); pacman.directionWatcher.set(right); }
 				break;
 			case 78:	// N pressed
-				if (!$('#playerName').is(':focus')) {
-					game.pause = 1;
-					game.newGame();
-				}
+				game.newGame();
 				break;
 			case 77:	// M pressed
 				game.toggleSound();
 				break;
-			case 8:		// Backspace pressed -> show Game Content
-			case 27:	// ESC pressed -> show Game Content
-				if (!$('#playerName').is(':focus')) {
-					evt.preventDefault();
-					game.showContent('game-content');
-				}
+			case 27:	// ESC pressed -> back to game / pause
+				evt.preventDefault();
+				if (!inGame) game.showContent('game-content');
+				else if (game.running && !game.pause && !game.gameOver) game.pauseResume();
 				break;
 			case 32:	// SPACE pressed -> pause Game
-				evt.preventDefault();
-				if (!(game.gameOver == true)
-					&& $('#game-content').is(':visible')
-				) game.pauseResume();
+			case 80:	// P pressed
+			case 13:	// ENTER
+				if (inGame) {
+					evt.preventDefault();
+					if (!(game.gameOver == true)) game.pauseResume();
+				}
 				break;
 		}
 	}
